@@ -99,10 +99,12 @@ def warm_start_model(checkpoint_path, model, ignore_layers):
 def load_checkpoint(checkpoint_path, model, optimizer):
     assert os.path.isfile(checkpoint_path)
     print("Loading checkpoint '{}'".format(checkpoint_path))
-    checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint_dict['state_dict'])
     optimizer.load_state_dict(checkpoint_dict['optimizer'])
     learning_rate = checkpoint_dict['learning_rate']
+    if not isinstance(learning_rate, list):
+        learning_rate = [learning_rate] * len(optimizer.param_groups)
     iteration = checkpoint_dict['iteration']
     print("Loaded checkpoint '{}' from iteration {}" .format(
         checkpoint_path, iteration))
@@ -144,6 +146,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
         logger.log_validation(val_loss, model, y, y_pred, iteration)
+    return val_loss
 
 
 def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
@@ -166,8 +169,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
     torch.cuda.manual_seed(hparams.seed)
 
     model = load_model(hparams)
-    learning_rate = hparams.learning_rate
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
+    optimizer = torch.optim.Adam(model.parameters(), lr=hparams.learning_rate,
                                  weight_decay=hparams.weight_decay)
 
     if hparams.fp16_run:
@@ -196,10 +198,13 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             model, optimizer, _learning_rate, iteration = load_checkpoint(
                 checkpoint_path, model, optimizer)
             if hparams.use_saved_learning_rate:
-                learning_rate = _learning_rate
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = _learning_rate
             iteration += 1  # next iteration is iteration + 1
             epoch_offset = max(0, int(iteration / len(train_loader)))
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+    learning_rate = []
     model.train()
     is_overflow = False
     # ================ MAIN TRAINNIG LOOP! ===================
@@ -208,8 +213,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             print("Epoch: {}".format(epoch))
             for i, batch in enumerate(train_loader):
                 start = time.perf_counter()
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = learning_rate
+                learning_rate = [param_group['lr'] for param_group in optimizer.param_groups]
 
                 model.zero_grad()
                 x, y = model.parse_batch(batch)
@@ -243,8 +247,15 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                     logger.log_training(
                         reduced_loss, grad_norm, learning_rate, duration, iteration)
 
+                if not is_overflow and (iteration % hparams.iters_per_validation == 0):
+                    val_loss = validate(model, criterion, valset, iteration,
+                             hparams.batch_size, n_gpus, collate_fn, logger,
+                             hparams.distributed_run, rank)
+                    scheduler.step(val_loss)
+
                 if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
-                    validate(model, criterion, valset, iteration,
+                    if iteration % hparams.iters_per_validation != 0:
+                        validate(model, criterion, valset, iteration,
                              hparams.batch_size, n_gpus, collate_fn, logger,
                              hparams.distributed_run, rank)
                     if rank == 0:

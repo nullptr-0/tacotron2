@@ -13,7 +13,8 @@ class Tacotron2Logger(SummaryWriter):
                      iteration):
             self.add_scalar("training.loss", reduced_loss, iteration)
             self.add_scalar("grad.norm", grad_norm, iteration)
-            self.add_scalar("learning.rate", learning_rate, iteration)
+            for step, learning_rate_value in enumerate(learning_rate):
+                self.add_scalar(f'learning.rate.{step}', learning_rate_value, iteration)
             self.add_scalar("duration", duration, iteration)
 
     def log_validation(self, reduced_loss, model, y, y_pred, iteration):
