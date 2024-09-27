@@ -198,8 +198,13 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
             model, optimizer, _learning_rate, iteration = load_checkpoint(
                 checkpoint_path, model, optimizer)
             if hparams.use_saved_learning_rate:
+                if len(optimizer.param_groups) != len(_learning_rate):
+                    print("size of optimizer.param_groups and size of _learning_rate mismatch")
+                for param_group, lr in zip(optimizer.param_groups, _learning_rate):
+                    param_group['lr'] = lr
+            else:
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = _learning_rate
+                    param_group['lr'] = hparams.learning_rate
             iteration += 1  # next iteration is iteration + 1
             epoch_offset = max(0, int(iteration / len(train_loader)))
 
